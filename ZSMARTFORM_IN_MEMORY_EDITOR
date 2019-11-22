@@ -1,0 +1,687 @@
+class ZSMARTFORM_IN_MEMORY_EDITOR definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods CONVERT_FUNCTION_SOURCE
+    changing
+      !CT_FUNCTION_SOURCE type CRMT_IC_STRING_TAB
+    exceptions
+      CONVERSION_FAILED .
+  methods GENERATE_TRANSIENT_PROGRAM
+    importing
+      !IT_FORM_SOURCE type CRMT_IC_STRING_TAB
+      !IT_FUNCTION_SOURCE type CRMT_IC_STRING_TAB
+      !IT_TOP_SOURCE type CRMT_IC_STRING_TAB
+    exporting
+      !EV_PROGRAM_NAME type CHAR08
+    exceptions
+      GENERATION_FAILED .
+  methods GET_SOURCE_INCLUDES
+    exporting
+      !ET_TOP_SOURCE type CRMT_IC_STRING_TAB
+      !ET_FUNCTION_SOURCE type CRMT_IC_STRING_TAB
+      !ET_FORM_SOURCE type CRMT_IC_STRING_TAB
+    exceptions
+      INCLUDE_NOT_FOUND .
+  methods SORT_ROOT_SECTIONS
+    importing
+      !IV_STARTING_FROM_SECTION_INDEX type NUMC2
+      !IT_SECTION_TARGET_INDEXES type ZGW_FACTSHEET_SECTION_IDX_TAB
+    changing
+      !CT_FORM_SOURCE type CRMT_IC_STRING_TAB
+    exceptions
+      ROOT_SECTION_SORT_FAILED .
+  methods CONSTRUCTOR
+    importing
+      !IV_FORM_NAME type TDSFNAME .
+protected section.
+
+  data GV_FORM_NAME type TDSFNAME .
+  data GV_FUNCTION_MODULE_NAME type RS38L_FNAM .
+private section.
+
+  methods SAFE_STRING_SEARCH
+    importing
+      !IV_SEARCH_STRING type STRING
+      !IT_SOURCE_CODE type CRMT_IC_STRING_TAB
+    returning
+      value(RV_RESULT) type INTEGER .
+ENDCLASS.
+
+
+
+CLASS ZSMARTFORM_IN_MEMORY_EDITOR IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZSMARTFORM_IN_MEMORY_EDITOR->CONSTRUCTOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_FORM_NAME                   TYPE        TDSFNAME
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD constructor.
+
+  me->gv_form_name = iv_form_name.
+
+* get FM name
+  CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+    EXPORTING
+      formname           = me->gv_form_name
+    IMPORTING
+      fm_name            = me->gv_function_module_name      "e.g. /1BCDWB/SF00000100
+    EXCEPTIONS
+      no_form            = 1
+      no_function_module = 2
+      OTHERS             = 3.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZSMARTFORM_IN_MEMORY_EDITOR->CONVERT_FUNCTION_SOURCE
+* +-------------------------------------------------------------------------------------------------+
+* | [<-->] CT_FUNCTION_SOURCE             TYPE        CRMT_IC_STRING_TAB
+* | [EXC!] CONVERSION_FAILED
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD convert_function_source.
+
+  DATA:
+    lv_search_string       TYPE          string,
+    lv_from_line           TYPE          i,
+    lv_to_line             TYPE          i,
+    ls_source_line         TYPE          string,
+    lv_check_next_line     TYPE          crmt_boolean,
+    lt_import_parameters   TYPE TABLE OF rsimp,
+    lt_changing_parameters TYPE TABLE OF rscha,
+    lt_tables_parameters   TYPE TABLE OF rstbl,
+    lt_export_parameters   TYPE TABLE OF rsexp,
+    lt_exception_list      TYPE TABLE OF rsexc,
+    ls_import_parameter    TYPE          rsimp,
+    ls_changing_parameter  TYPE          rscha,
+    ls_table_parameter     TYPE          rstbl,
+    ls_export_parameter    TYPE          rsexp,
+    lt_form_header         TYPE          crmt_ic_string_tab,
+    lt_form_trailer        TYPE          crmt_ic_string_tab,
+    lv_current_line        TYPE          i,
+    lv_form_name           TYPE          string,
+    lv_form_line           TYPE          string,
+    lv_source_line         TYPE          string.
+
+  FIELD-SYMBOLS:
+    <source_line>          TYPE          string.
+
+* FUNCTION -> FORM
+  lv_search_string = |FUNCTION | && me->gv_function_module_name && |.|.  " e.g. FUNCTION /1BCDWB/SF00000100.
+  READ TABLE ct_function_source TRANSPORTING NO FIELDS
+    WITH KEY table_line = lv_search_string.
+  IF sy-subrc IS INITIAL.
+    lv_from_line = sy-tabix.
+  ELSE.
+*   exact format not found => perform safe search
+    SHIFT lv_search_string RIGHT DELETING TRAILING |.|.
+    lv_from_line = me->safe_string_search( iv_search_string = lv_search_string
+                                           it_source_code   = ct_function_source ).
+  ENDIF.
+
+  IF lv_from_line IS NOT INITIAL.
+
+    lv_check_next_line = abap_true.
+
+    lv_to_line = lv_from_line.
+    WHILE lv_check_next_line EQ abap_true.
+      ADD 1 TO lv_to_line.
+      READ TABLE ct_function_source INTO ls_source_line
+        INDEX lv_to_line.
+      IF sy-subrc IS INITIAL
+      AND strlen( ls_source_line ) GE 2
+      AND ls_source_line(2) EQ '*"'.
+*     check next line
+      ELSE.
+        lv_check_next_line = abap_false.
+        SUBTRACT 1 FROM lv_to_line.
+      ENDIF.
+    ENDWHILE.
+
+*   remove function header
+    DELETE ct_function_source FROM lv_from_line TO lv_to_line.
+
+*   get function interface
+    CALL FUNCTION 'FUNCTION_IMPORT_INTERFACE'
+      EXPORTING
+        funcname           = me->gv_function_module_name
+        inactive_version   = space
+      TABLES
+        import_parameter   = lt_import_parameters
+        changing_parameter = lt_changing_parameters
+        tables_parameter   = lt_tables_parameters
+        export_parameter   = lt_export_parameters
+        exception_list     = lt_exception_list
+      EXCEPTIONS
+        OTHERS             = 1.
+    IF sy-subrc IS INITIAL.
+
+      lv_form_line = ||.
+      APPEND lv_form_line TO lt_form_header.
+
+*     declare GLOBAL variables, matching FORM import parameters
+      lv_form_line = |DATA:|.
+      APPEND lv_form_line TO lt_form_header.
+
+*     IMPORTING parameters and TABLES
+      LOOP AT lt_import_parameters INTO ls_import_parameter.
+        lv_form_line = |    | && ls_import_parameter-parameter && | TYPE | && ls_import_parameter-typ && |,|.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+      LOOP AT lt_tables_parameters INTO ls_table_parameter.
+*       no LIKE's supported
+        lv_form_line = |    | && ls_table_parameter-parameter && | TYPE | && ls_table_parameter-typ && |,|.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+
+*     EXPORTING parameters
+      LOOP AT lt_export_parameters INTO ls_export_parameter.
+        IF sy-tabix NE lines( lt_export_parameters ).
+          lv_form_line = |    | && ls_export_parameter-parameter && | TYPE | && ls_export_parameter-typ && |,|.
+        ELSE.
+*         close DATA statement with .
+          lv_form_line = |    | && ls_export_parameter-parameter && | TYPE | && ls_export_parameter-typ && |.|.
+        ENDIF.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+
+      lv_form_line = ||.
+      APPEND lv_form_line TO lt_form_header.
+
+*     FORM subroutine keeps function-module name
+      lv_form_name = me->gv_function_module_name.
+      lv_form_line = |FORM | && lv_form_name.
+      APPEND lv_form_line TO lt_form_header.
+
+      lv_form_line = |  USING|.
+      APPEND lv_form_line TO lt_form_header.
+
+*     new parameter, to pass name of generated program
+      lv_form_line = |    IV_PROG_NAME         TYPE CHAR08|.
+      APPEND lv_form_line TO lt_form_header.
+
+*     IMPORTING parameters and TABLES
+      LOOP AT lt_import_parameters INTO ls_import_parameter.
+        lv_form_line = |    | && |%| && ls_import_parameter-parameter && | TYPE | && ls_import_parameter-typ.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+      LOOP AT lt_tables_parameters INTO ls_table_parameter.
+*       no LIKE's supported!
+        lv_form_line = |    | && |%| && ls_table_parameter-parameter && | TYPE | && ls_table_parameter-typ.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+
+      lv_form_line = |  CHANGING|.
+      APPEND lv_form_line TO lt_form_header.
+
+*     EXPORTING parameters
+      LOOP AT lt_export_parameters INTO ls_export_parameter.
+        IF sy-tabix NE lines( lt_export_parameters ).
+          lv_form_line = |    | && |%| && ls_export_parameter-parameter && | TYPE | && ls_export_parameter-typ.
+        ELSE.
+*         close FORM statement on last CHANGING parameter
+          lv_form_line = |    | && |%| && ls_export_parameter-parameter && | TYPE | && ls_export_parameter-typ && |.|.
+        ENDIF.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+
+*     IMPORTING parameters and TABLES: map USING parameters to GLOBAL parameters
+      LOOP AT lt_import_parameters INTO ls_import_parameter.
+        lv_form_line = |    | && ls_import_parameter-parameter && | = | && |%| && ls_import_parameter-parameter && |.|.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+      LOOP AT lt_tables_parameters INTO ls_table_parameter.
+*       no LIKE's supported
+        lv_form_line = |    | && ls_table_parameter-parameter && | = | && |%| && ls_table_parameter-parameter && |.|.
+        APPEND lv_form_line TO lt_form_header.
+      ENDLOOP.
+
+*     EXPORTING parameters: map GLOBAL parameters to CHANGING parameters
+      LOOP AT lt_export_parameters INTO ls_export_parameter.
+        lv_form_line = |  | && |%| && ls_export_parameter-parameter && | = | && ls_export_parameter-parameter && |.|.
+        APPEND lv_form_line TO lt_form_trailer.
+      ENDLOOP.
+
+*     insert FORM header
+      INSERT LINES OF lt_form_header INTO ct_function_source INDEX 1.
+
+*     %DOCSTRUC[ 1 ]-CALLPROG: set program created by GENERATE SUBROUTINE POOL
+      lv_search_string = `  CALL FUNCTION 'SSFCOMP_PROCESS_DOCUMENT'`.
+      READ TABLE ct_function_source TRANSPORTING NO FIELDS
+        WITH KEY table_line = lv_search_string.
+      IF sy-subrc IS INITIAL.
+        lv_current_line = sy-tabix.
+      ELSE.
+*       exact format not found => perform safe search
+        lv_current_line = me->safe_string_search( iv_search_string = lv_search_string
+                                                  it_source_code   = ct_function_source ).
+      ENDIF.
+
+      IF lv_current_line IS NOT INITIAL.
+
+*       following lines to set transient program as callback program for SAPLSTXBC:
+
+*       -----------------------------------------------------
+*       LOOP AT %docstruc ASSIGNING FIELD-SYMBOL(<docstruc>).
+*         <docstruc>-callprog = iv_prog_name.
+*       ENDLOOP.
+*       -----------------------------------------------------
+
+        lv_source_line = `  ENDLOOP.`.
+        INSERT lv_source_line INTO ct_function_source INDEX lv_current_line.
+
+        lv_source_line = `    <docstruc>-callprog = iv_prog_name.`.
+        INSERT lv_source_line INTO ct_function_source INDEX lv_current_line.
+
+        lv_source_line = `  LOOP AT %docstruc ASSIGNING FIELD-SYMBOL(<docstruc>).`.
+        INSERT lv_source_line INTO ct_function_source INDEX lv_current_line.
+
+      ELSE.
+        RAISE conversion_failed.
+      ENDIF.
+
+*     ENDFUNCTION -> ENDFORM
+      lv_search_string = 'ENDFUNCTION.'.
+      READ TABLE ct_function_source TRANSPORTING NO FIELDS
+        WITH KEY table_line = lv_search_string.
+      IF sy-subrc IS INITIAL.
+        lv_current_line = sy-tabix.
+      ELSE.
+*       exact format not found => perform safe search
+        SHIFT lv_search_string RIGHT DELETING TRAILING |.|.
+        lv_current_line = me->safe_string_search( iv_search_string = lv_search_string
+                                                  it_source_code   = ct_function_source ).
+      ENDIF.
+
+      IF lv_current_line IS NOT INITIAL.
+
+*       insert FORM trailer
+        INSERT LINES OF lt_form_trailer INTO ct_function_source INDEX lv_current_line.
+
+*       move to line containing ENDFORM statement
+        lv_current_line = lv_current_line + lines( lt_form_trailer ).
+
+        READ TABLE ct_function_source ASSIGNING <source_line>
+          INDEX lv_current_line.
+        IF sy-subrc IS INITIAL.
+          <source_line> = 'ENDFORM.'.
+        ELSE.
+          RAISE conversion_failed.
+        ENDIF.
+      ELSE.
+        RAISE conversion_failed.
+      ENDIF.
+
+    ELSE.
+      RAISE conversion_failed.
+    ENDIF.
+  ELSE.
+    RAISE conversion_failed.
+  ENDIF.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZSMARTFORM_IN_MEMORY_EDITOR->GENERATE_TRANSIENT_PROGRAM
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IT_FORM_SOURCE                 TYPE        CRMT_IC_STRING_TAB
+* | [--->] IT_FUNCTION_SOURCE             TYPE        CRMT_IC_STRING_TAB
+* | [--->] IT_TOP_SOURCE                  TYPE        CRMT_IC_STRING_TAB
+* | [<---] EV_PROGRAM_NAME                TYPE        CHAR08
+* | [EXC!] GENERATION_FAILED
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD generate_transient_program.
+
+  DATA:
+    lt_program_source TYPE crmt_ic_string_tab,
+    lv_message        TYPE char128,
+    lv_line           TYPE i.
+
+* top source BEFORE function source BEFORE form source
+  APPEND LINES OF it_top_source      TO lt_program_source.
+  APPEND LINES OF it_function_source TO lt_program_source.
+  APPEND LINES OF it_form_source     TO lt_program_source.
+
+  TRY.
+      GENERATE SUBROUTINE POOL lt_program_source
+        NAME    ev_program_name
+        MESSAGE lv_message
+        LINE    lv_line.
+    CATCH cx_sy_generate_subpool_full.
+*     no further temporary subroutine pools can be generated
+      RAISE generation_failed.
+  ENDTRY.
+
+  IF lv_message IS NOT INITIAL.
+    RAISE generation_failed.
+  ENDIF.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZSMARTFORM_IN_MEMORY_EDITOR->GET_SOURCE_INCLUDES
+* +-------------------------------------------------------------------------------------------------+
+* | [<---] ET_TOP_SOURCE                  TYPE        CRMT_IC_STRING_TAB
+* | [<---] ET_FUNCTION_SOURCE             TYPE        CRMT_IC_STRING_TAB
+* | [<---] ET_FORM_SOURCE                 TYPE        CRMT_IC_STRING_TAB
+* | [EXC!] INCLUDE_NOT_FOUND
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD get_source_includes.
+
+  DATA:
+    lt_parts        TYPE TABLE OF string,
+    lv_part         TYPE          string,
+    lv_include_name TYPE          progname.
+
+* &1: function module name
+* &2: include name suffix: TOP, F01 or U01
+  DEFINE _set_include_name.
+    CLEAR lv_include_name.
+    SPLIT &1 AT `/` INTO TABLE lt_parts.
+    DELETE lt_parts WHERE table_line IS INITIAL.
+    lv_include_name = |/| && lt_parts[ 1 ] && |/| && |L| && lt_parts[ 2 ] && &2.
+  END-OF-DEFINITION.
+
+* TOP include
+  _set_include_name me->gv_function_module_name `TOP`.
+  READ REPORT lv_include_name INTO et_top_source.       " e.g. /1BCDWB/LSF00000100TOP
+  IF sy-subrc IS NOT INITIAL.
+    RAISE include_not_found.
+  ENDIF.
+
+* U01 include (= function-module)
+  _set_include_name me->gv_function_module_name `U01`.
+  READ REPORT lv_include_name INTO et_function_source.  " e.g. /1BCDWB/LSF00000100U01
+  IF sy-subrc IS NOT INITIAL.
+    RAISE include_not_found.
+  ENDIF.
+
+* F01 include
+  _set_include_name me->gv_function_module_name `F01`.
+  READ REPORT lv_include_name INTO et_form_source.      " e.g. /1BCDWB/LSF00000100F01
+  IF sy-subrc IS NOT INITIAL.
+    RAISE include_not_found.
+  ENDIF.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZSMARTFORM_IN_MEMORY_EDITOR->SAFE_STRING_SEARCH
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_SEARCH_STRING               TYPE        STRING
+* | [--->] IT_SOURCE_CODE                 TYPE        CRMT_IC_STRING_TAB
+* | [<-()] RV_RESULT                      TYPE        INTEGER
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD safe_string_search.
+
+  DATA:
+    lv_search_string TYPE string,
+    lv_source_line   TYPE string.
+
+  lv_search_string = iv_search_string.  " e.g. FUNCTION /1BCDWB/SF00000100.
+  CONDENSE lv_search_string.
+  REPLACE ALL OCCURRENCES OF | | IN lv_search_string WITH `*`.
+  lv_search_string = |*| && lv_search_string && |*|.
+
+* slow, but safe
+  LOOP AT it_source_code INTO lv_source_line.
+    IF lv_source_line CP lv_search_string.
+      rv_result = sy-tabix.
+*     return to caller
+      RETURN.
+    ENDIF.
+  ENDLOOP.
+
+ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZSMARTFORM_IN_MEMORY_EDITOR->SORT_ROOT_SECTIONS
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_STARTING_FROM_SECTION_INDEX TYPE        NUMC2
+* | [--->] IT_SECTION_TARGET_INDEXES      TYPE        ZGW_FACTSHEET_SECTION_IDX_TAB
+* | [<-->] CT_FORM_SOURCE                 TYPE        CRMT_IC_STRING_TAB
+* | [EXC!] ROOT_SECTION_SORT_FAILED
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+METHOD sort_root_sections.
+
+  TYPES:
+    BEGIN OF ty_fullname,
+      form TYPE tdsfname,
+      vari TYPE tdvariant,
+      actv TYPE tdbool,
+    END OF ty_fullname,
+
+    BEGIN OF ty_section,
+      name        TYPE string,
+      from_line   TYPE i,
+      to_line     TYPE i,
+      source_code TYPE crmt_ic_string_tab,
+      index       TYPE i,
+    END OF ty_section.
+
+  DATA:
+    ls_header               TYPE          ssfformhd,
+    lt_reftab               TYPE          tsfref,
+    lt_docstruc             TYPE          tsfdocstrc,
+    lt_tabdefs              TYPE          tsftabdef,
+    ls_docstruc             TYPE          ssfdocstrc,
+    ls_fullname             TYPE          ty_fullname,
+    lv_search_string        TYPE          string,
+    lv_current_line         TYPE          i,
+    ls_section              TYPE          ty_section,
+    lt_sections             TYPE TABLE OF ty_section,
+    lv_root_from_line       TYPE          i,
+    lv_from_line            TYPE          i,
+    lv_to_line              TYPE          i,
+    lv_from_pos             TYPE          i,
+    lv_to_pos               TYPE          i,
+    lv_length               TYPE          i,
+    lv_folder_name          TYPE          string,
+    lv_tabix                TYPE          i,
+    lv_section_is_not_open  TYPE          crmt_boolean,
+    lv_source_line          TYPE          string,
+    lv_insertion_line       TYPE          i,
+    lv_nesting_level        TYPE          i,
+    lv_section_index        TYPE          i,
+    ls_section_target_index TYPE          zgw_factsheet_section_idx.
+
+  FIELD-SYMBOLS:
+    <section>                TYPE          ty_section.
+
+  ls_fullname-form = me->gv_form_name.
+  ls_fullname-vari = space.
+  ls_fullname-actv = abap_true.
+
+  IMPORT header   TO ls_header
+         reftab   TO lt_reftab
+         docstruc TO lt_docstruc
+         tabdef   TO lt_tabdefs
+         FROM DATABASE stxfcontr(sf) ID ls_fullname.
+
+* get MAIN window form (first occurrence is OK)
+  READ TABLE lt_docstruc INTO ls_docstruc
+    WITH KEY tdwindow = 'MAIN'.
+  IF sy-subrc IS INITIAL.
+
+*   locate %WIx_BODY form
+    lv_search_string = |FORM | && ls_docstruc-callform && |_BODY.|.
+
+    READ TABLE ct_form_source TRANSPORTING NO FIELDS
+      WITH KEY table_line = lv_search_string.
+    IF sy-subrc IS INITIAL.
+      lv_current_line = sy-tabix.
+    ELSE.
+*     exact format not found => perform safe search
+      SHIFT lv_search_string RIGHT DELETING TRAILING |.|.
+      lv_current_line = me->safe_string_search( iv_search_string = lv_search_string
+                                                it_source_code   = ct_form_source   ).
+    ENDIF.
+
+    IF lv_current_line IS NOT INITIAL.
+
+      lv_section_is_not_open = abap_true. " no section open
+
+*     form here on, we progress row by row
+      LOOP AT ct_form_source INTO lv_source_line FROM lv_current_line.
+
+        IF lv_source_line CP `CALL*FUNCTION*'SSFCOMP_XSF_SECTION'*`.
+
+*         CALL FUNCTION 'SSFCOMP_XSF_SECTION'  <--
+*           EXPORTING  NAME   = '...'
+*                      MODE   = %OPEN
+*           EXCEPTIONS OTHERS = 1.
+*         IF SY-SUBRC <> 0. RAISE ERROR. ENDIF.
+
+          IF lv_section_is_not_open EQ abap_true. " no section open
+            lv_section_is_not_open = abap_false.  " there is a section open now
+            lv_root_from_line = lv_current_line + lv_tabix.
+          ENDIF.
+          lv_from_line = lv_current_line + lv_tabix.
+
+        ELSEIF lv_source_line CP `*ENDFORM*`.
+*         exit loop
+          EXIT.
+
+        ELSE.
+
+          IF sy-tabix = lv_from_line + 1.
+
+            IF lv_source_line CP `*EXPORTING*NAME*=*'*'*`.
+
+*             CALL FUNCTION 'SSFCOMP_XSF_SECTION'
+*               EXPORTING  NAME   = '...'          <--
+*                          MODE   = %OPEN
+*               EXCEPTIONS OTHERS = 1.
+*             IF SY-SUBRC <> 0. RAISE ERROR. ENDIF.
+
+              IF lv_nesting_level EQ 0.
+
+                CLEAR:
+                  lv_from_pos,
+                  lv_to_pos,
+                  lv_length.
+
+                FIND FIRST OCCURRENCE OF `'` IN lv_source_line MATCH OFFSET lv_from_pos.
+                IF sy-subrc IS INITIAL.
+                  ADD 1 TO lv_from_pos.
+                  FIND FIRST OCCURRENCE OF `'` IN SECTION OFFSET lv_from_pos OF lv_source_line
+                   MATCH OFFSET lv_to_pos.
+                  IF sy-subrc IS INITIAL.
+                    lv_length = lv_to_pos - lv_from_pos.
+                    lv_folder_name = lv_source_line+lv_from_pos(lv_length).
+
+                    ls_section-name = lv_folder_name.
+                    ls_section-from_line = lv_root_from_line.
+
+                    CLEAR:
+                      lv_root_from_line.
+
+                  ENDIF.
+                ENDIF.
+
+              ENDIF.
+
+*             next time we encounter `EXPORTING  NAME   = '...'`, we assume this will be a
+*             sub-section, unless we encounter an `EXPORTING  MODE   = %CLOSE` command before
+              SUBTRACT 1 FROM lv_nesting_level.
+
+            ELSEIF lv_source_line CP `*EXPORTING*MODE*=*%CLOSE*`.
+
+*             CALL FUNCTION 'SSFCOMP_XSF_SECTION'
+*               EXPORTING  MODE   = %CLOSE         <--
+*               EXCEPTIONS OTHERS = 1.
+*             IF SY-SUBRC <> 0. RAISE ERROR. ENDIF.
+
+              IF lv_section_is_not_open EQ abap_false.  " there is a section open now
+*               leaving (assumed) nested sub-section
+                ADD 1 TO lv_nesting_level.
+              ENDIF.
+
+              IF lv_nesting_level EQ 0.
+
+                ls_section-to_line = sy-tabix + 2.
+                ADD 1 TO lv_section_index.
+                ls_section-index = lv_section_index.
+
+                IF lv_section_index GE iv_starting_from_section_index.  " <-- protect e.g. HEADER section
+                  APPEND ls_section TO lt_sections.
+                ENDIF.
+
+                CLEAR ls_section.
+                lv_section_is_not_open = abap_true. "  no section open
+
+              ENDIF.
+
+            ENDIF.
+
+          ENDIF.
+
+        ENDIF.
+
+        ADD 1 TO lv_tabix.
+
+      ENDLOOP.
+
+      IF lt_sections[] IS NOT INITIAL.
+
+        LOOP AT lt_sections ASSIGNING <section>.
+          INSERT LINES OF ct_form_source FROM <section>-from_line TO <section>-to_line
+            INTO TABLE <section>-source_code.
+        ENDLOOP.
+
+*       remember insertion point of first section
+        READ TABLE lt_sections INTO ls_section INDEX 1.
+        lv_insertion_line = ls_section-from_line.
+
+*       deletion of sections needs to happen starting from the end
+        SORT lt_sections BY index DESCENDING.
+
+*       remove old sections
+        LOOP AT lt_sections INTO ls_section.
+          DELETE ct_form_source FROM ls_section-from_line TO ls_section-to_line.
+        ENDLOOP.
+
+*       change of section sequence happens here!
+        LOOP AT lt_sections ASSIGNING <section>.
+
+*         get target index
+          READ TABLE it_section_target_indexes INTO ls_section_target_index
+            WITH KEY section_name = <section>-name.
+          IF sy-subrc IS INITIAL.
+            <section>-index = ls_section_target_index-index.
+          ELSE.
+            <section>-index = 0.
+          ENDIF.
+
+        ENDLOOP.
+
+*       insertion of sections needs to happen starting from the end
+        SORT lt_sections BY index DESCENDING.
+
+*       insert sections with updated sequence
+        LOOP AT lt_sections INTO ls_section
+          WHERE index IS NOT INITIAL.
+          INSERT LINES OF ls_section-source_code INTO ct_form_source
+            INDEX lv_insertion_line.
+        ENDLOOP.
+
+      ENDIF.
+
+    ELSE.
+      RAISE root_section_sort_failed.
+    ENDIF.
+
+  ENDIF.
+
+ENDMETHOD.
+ENDCLASS.
