@@ -1,0 +1,252 @@
+*&---------------------------------------------------------------------*
+*& Report ZSMARTFORM_SECTION_RT_SORT
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT zsmartform_section_rt_sort.
+
+SELECTION-SCREEN BEGIN OF BLOCK bl01 WITH FRAME TITLE TEXT-001.
+* output using standard function-module
+SELECTION-SCREEN: BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(32) TEXT-002 FOR FIELD pa_stdfm.
+SELECTION-SCREEN  POSITION 34.
+PARAMETERS: pa_stdfm RADIOBUTTON GROUP typ DEFAULT 'X'.
+SELECTION-SCREEN: END OF LINE.
+* sorted output using custom form
+SELECTION-SCREEN: BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(32) TEXT-003 FOR FIELD pa_sortd.
+SELECTION-SCREEN  POSITION 34.
+PARAMETERS: pa_sortd RADIOBUTTON GROUP typ.
+SELECTION-SCREEN: END OF LINE.
+SELECTION-SCREEN END OF BLOCK bl01.
+
+SELECTION-SCREEN: BEGIN OF BLOCK bl02 WITH FRAME TITLE TEXT-004.
+* preference folder A
+SELECTION-SCREEN: BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(32) TEXT-005 FOR FIELD pa_prefa.
+SELECTION-SCREEN  POSITION 34.
+PARAMETERS: pa_prefa TYPE numc2 DEFAULT 2.
+SELECTION-SCREEN: END OF LINE.
+* preference folder B
+SELECTION-SCREEN: BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(32) TEXT-006 FOR FIELD pa_prefb.
+SELECTION-SCREEN  POSITION 34.
+PARAMETERS: pa_prefb TYPE numc2 DEFAULT 3.
+SELECTION-SCREEN: END OF LINE.
+* preference folder C
+SELECTION-SCREEN: BEGIN OF LINE.
+SELECTION-SCREEN COMMENT 1(32) TEXT-007 FOR FIELD pa_prefc.
+SELECTION-SCREEN  POSITION 34.
+PARAMETERS: pa_prefc TYPE numc2 DEFAULT 1.
+SELECTION-SCREEN: END OF LINE.
+SELECTION-SCREEN: END OF BLOCK bl02.
+
+TYPES:
+  BEGIN OF ty_section_indexes,
+    folder_a TYPE numc2,
+    folder_b TYPE numc2,
+    folder_c TYPE numc2,
+  END OF ty_section_indexes.
+
+DATA:
+
+  lv_form_name              TYPE          tdsfname,
+  ls_user_preferences       TYPE          ty_section_indexes,
+
+  lv_fm_name                TYPE          rs38l_fnam,
+  ls_archive_index          TYPE          toa_dara,
+  lt_archive_index_tab      TYPE          tsfdara,
+  ls_archive_parameters     TYPE          arc_params,
+  ls_control_parameters     TYPE          ssfctrlop,
+  ls_mail_appl_obj          TYPE          swotobjid,
+  ls_mail_recipient         TYPE          swotobjid,
+  ls_mail_sender            TYPE          swotobjid,
+  ls_output_options         TYPE          ssfcompop,
+  ls_user_settings          TYPE          tdbool,
+  lv_document_output_info   TYPE          ssfcrespd,
+  ls_job_output_info        TYPE          ssfcrescl,
+  ls_job_output_options     TYPE          ssfcresop,
+
+  lv_demo_param             TYPE          boolean,
+  lt_demo_tab               TYPE          text_line_tab,
+
+  lr_smartform_editor       TYPE REF TO   zsmartform_in_memory_editor,
+  ls_section_target_index   TYPE          zgw_factsheet_section_idx,
+  lt_section_target_indexes TYPE          zgw_factsheet_section_idx_tab,
+  lt_top_source             TYPE TABLE OF string,
+  lt_form_source            TYPE TABLE OF string,
+  lt_function_source        TYPE TABLE OF string,
+  lr_struct_descr           TYPE REF TO   cl_abap_structdescr,
+  ls_component              TYPE          abap_compdescr,
+  ls_section_target_indexes TYPE          zgw_factsheet_section_idx,
+  lv_starting_from_index    TYPE          numc2,
+  lv_subrc                  TYPE          sysubrc,
+  lv_program_name           TYPE          char08.
+
+FIELD-SYMBOLS:
+  <index>                   TYPE          numc2.
+
+lv_form_name = 'ZZ_DEMO_SF_1'.
+
+* user preferences are typically stored in a transparent table
+ls_user_preferences-folder_a = pa_prefa.
+ls_user_preferences-folder_b = pa_prefb.
+ls_user_preferences-folder_c = pa_prefc.
+
+* control parameters
+ls_control_parameters-langu     = sy-langu.
+ls_control_parameters-no_open   = abap_false.
+ls_control_parameters-no_close  = abap_false.
+ls_control_parameters-no_dialog = abap_true.
+ls_control_parameters-preview   = abap_true.
+
+* output options
+ls_output_options-tddest    = 'LOCL'.
+ls_output_options-tdnoprint = abap_false.
+
+* get FM name
+CALL FUNCTION 'SSF_FUNCTION_MODULE_NAME'
+  EXPORTING
+    formname           = lv_form_name
+  IMPORTING
+    fm_name            = lv_fm_name          "e.g. /1BCDWB/SF00000100
+  EXCEPTIONS
+    no_form            = 1
+    no_function_module = 2
+    OTHERS             = 3.
+CHECK sy-subrc IS INITIAL.
+
+IF pa_stdfm EQ abap_true. "standard function-module
+
+* run standard function-module
+  CALL FUNCTION lv_fm_name
+    EXPORTING
+      control_parameters   = ls_control_parameters
+      output_options       = ls_output_options
+      demo_import_param    = lv_demo_param " <-- custom parameter
+    IMPORTING
+      document_output_info = lv_document_output_info
+      job_output_info      = ls_job_output_info
+      job_output_options   = ls_job_output_options
+    TABLES
+      demo_import_tab      = lt_demo_tab  " <-- custom table, defined in smartform with type assignment 'TYPE' (not 'LIKE')
+    EXCEPTIONS
+      formatting_error     = 1
+      internal_error       = 2
+      send_error           = 3
+      user_canceled        = 4
+      OTHERS               = 5.
+
+ELSEIF pa_sortd EQ abap_true. "sorted output using custom form
+
+*-------------------------------------------------------------------------------------------------*
+* instantiate smartform in-memory editor
+*-------------------------------------------------------------------------------------------------*
+
+  CREATE OBJECT lr_smartform_editor
+    EXPORTING
+      iv_form_name = lv_form_name.
+
+*-------------------------------------------------------------------------------------------------*
+* get source includes
+*-------------------------------------------------------------------------------------------------*
+
+  lr_smartform_editor->get_source_includes(
+                         IMPORTING et_top_source      = lt_top_source
+                                   et_function_source = lt_function_source
+                                   et_form_source     = lt_form_source
+                         EXCEPTIONS include_not_found = 1
+                                    OTHERS            = 2                   ).
+  lv_subrc = sy-subrc.
+  IF lv_subrc IS INITIAL.
+
+*-------------------------------------------------------------------------------------------------*
+*   convert FUNCTION to FORM, keeping same name
+*-------------------------------------------------------------------------------------------------*
+
+    lr_smartform_editor->convert_function_source(
+                           CHANGING   ct_function_source = lt_function_source
+                           EXCEPTIONS conversion_failed = 1
+                                      OTHERS            = 2                    ).
+    lv_subrc = sy-subrc.
+    IF lv_subrc IS INITIAL.
+
+*-------------------------------------------------------------------------------------------------*
+*    sort root sections
+*-------------------------------------------------------------------------------------------------*
+
+*     transpose structure to table
+      lr_struct_descr ?= cl_abap_typedescr=>describe_by_data( ls_user_preferences ).
+      LOOP AT lr_struct_descr->components INTO ls_component.
+        ASSIGN COMPONENT ls_component-name OF STRUCTURE ls_user_preferences TO <index>.
+        IF sy-subrc IS INITIAL.
+          ls_section_target_index-section_name = ls_component-name.
+          ls_section_target_index-index        = <index>.
+          APPEND ls_section_target_index TO lt_section_target_indexes.
+        ENDIF.
+      ENDLOOP.
+
+*     process all sections (but could protect n first sections)
+      lv_starting_from_index = 1.
+
+*     sort root sections
+      lr_smartform_editor->sort_root_sections(
+                             EXPORTING  iv_starting_from_section_index = lv_starting_from_index
+                                        it_section_target_indexes      = lt_section_target_indexes
+                             CHANGING   ct_form_source                 = lt_form_source
+                             EXCEPTIONS root_section_sort_failed      = 1
+                                        OTHERS                        = 2                          ).
+
+      lv_subrc = sy-subrc.
+      IF lv_subrc IS INITIAL.
+
+*-------------------------------------------------------------------------------------------------*
+*       generate transient program
+*-------------------------------------------------------------------------------------------------*
+
+        lr_smartform_editor->generate_transient_program(
+                               EXPORTING  it_top_source      = lt_top_source
+                                          it_function_source = lt_function_source
+                                          it_form_source     = lt_form_source
+                               IMPORTING  ev_program_name    = lv_program_name      " --> OUT
+                               EXCEPTIONS generation_failed  = 1
+                                          OTHERS             = 2                  ).
+        lv_subrc = sy-subrc.
+
+      ENDIF.
+    ENDIF.
+  ENDIF.
+
+  IF lv_subrc IS NOT INITIAL.
+*   could call standard function-module, as fallback
+  ELSE.
+
+*-------------------------------------------------------------------------------------------------*
+* invoke smartform
+*-------------------------------------------------------------------------------------------------*
+
+*   function module was converted into FORM subroutine, keeping same name
+    lv_form_name = lv_fm_name.
+
+    PERFORM (lv_form_name) IN PROGRAM (lv_program_name)
+      USING
+        lv_program_name        " <-- new parameter, to pass name of generated program
+        ls_archive_index
+        lt_archive_index_tab
+        ls_archive_parameters
+        ls_control_parameters
+        ls_mail_appl_obj
+        ls_mail_recipient
+        ls_mail_sender
+        ls_output_options
+        ls_user_settings
+        lv_demo_param          " <-- custom import parameter(s) of function
+        lt_demo_tab            " <-- custom table(s) of function, defined in smartform with type assignment 'TYPE' (not 'LIKE')
+      CHANGING
+        lv_document_output_info
+        ls_job_output_info
+        ls_job_output_options.
+
+  ENDIF.
+
+ENDIF.
